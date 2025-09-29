@@ -252,12 +252,15 @@ def analyze():
         ai_confidence = 50
 
     # 6) Combine decisions (priority: Dataset > VirusTotal > AI)
-    if dataset_verdict == "Phishing" or vt_verdict == "Phishing" or (prediction == 1 and ai_confidence >= 70):
-        verdict, recommendation, confidence = "Phishing", "Do not click", max(ai_confidence, 95)
-    elif dataset_verdict == "Suspicious" or vt_verdict == "Suspicious" or (50 <= ai_confidence < 70):
-        verdict, recommendation, confidence = "Suspicious", "Proceed with caution", max(ai_confidence, 80)
-    else:
-        verdict, recommendation, confidence = "Legitimate", "Safe to open", max(ai_confidence, 90)
+    if vt_verdict == "Phishing":
+    verdict, recommendation, confidence = "Phishing", "Do not click", 95
+elif vt_verdict == "Legitimate":
+    verdict, recommendation, confidence = "Legitimate", "Safe to open", 95
+elif prediction == 1 and ai_confidence >= 70:
+    verdict, recommendation, confidence = "Suspicious", "Proceed with caution", ai_confidence
+else:
+    verdict, recommendation, confidence = "Legitimate", "Safe to open", max(ai_confidence, 90)
+
 
     # 7) Save to retrain_data
     try:
@@ -383,5 +386,6 @@ def get_inbox():
 # Run
 # ===============================
 if __name__ == "__main__":
-    print("🚀 Starting Link Safety Checker backend with caching + retrain_data...")
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))  # Render sets PORT automatically
+    print(f"🚀 Starting on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
