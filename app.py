@@ -253,13 +253,13 @@ def analyze():
 
     # 6) Combine decisions (priority: Dataset > VirusTotal > AI)
     if vt_verdict == "Phishing":
-         verdict, recommendation, confidence = "Phishing", "Do not click", 95
+        verdict, recommendation, confidence = "Phishing", "Do not click", 95
     elif vt_verdict == "Legitimate":
-         verdict, recommendation, confidence = "Legitimate", "Safe to open", 95
+        verdict, recommendation, confidence = "Legitimate", "Safe to open", 95
     elif prediction == 1 and ai_confidence >= 70:
-         verdict, recommendation, confidence = "Suspicious", "Proceed with caution", ai_confidence
+        verdict, recommendation, confidence = "Suspicious", "Proceed with caution", ai_confidence
     else:
-         verdict, recommendation, confidence = "Legitimate", "Safe to open", max(ai_confidence, 90)
+        verdict, recommendation, confidence = "Legitimate", "Safe to open", max(ai_confidence, 90)
 
 
     # 7) Save to retrain_data
