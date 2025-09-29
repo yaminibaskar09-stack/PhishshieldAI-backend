@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 import json
 import time
 
-
 DB_PATH = "data/app.db"
 
 def init_db():
@@ -38,7 +37,6 @@ def init_db():
 # Call at startup
 init_db()
 
-
 # ===============================
 # Load .env
 # ===============================
@@ -57,7 +55,6 @@ CORS(app)
 
 MODEL_PATH = "model/url_model.pkl"
 COLS_PATH = "model/model_columns.pkl"
-DB_PATH = "data/app.db"
 
 # ===============================
 # Load AI model
@@ -72,7 +69,7 @@ os.makedirs("data", exist_ok=True)
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 c = conn.cursor()
 
-# history table (unchanged)
+# history table
 c.execute("""
 CREATE TABLE IF NOT EXISTS history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,7 +82,7 @@ CREATE TABLE IF NOT EXISTS history (
 )
 """)
 
-# vt_cache: cache the VirusTotal response summary to avoid repeated VT calls
+# vt_cache
 c.execute("""
 CREATE TABLE IF NOT EXISTS vt_cache (
     url TEXT PRIMARY KEY,
@@ -95,7 +92,7 @@ CREATE TABLE IF NOT EXISTS vt_cache (
 )
 """)
 
-# retrain_data: store final label so future checks skip VT and use DB label (preserve VT quotas)
+# retrain_data
 c.execute("""
 CREATE TABLE IF NOT EXISTS retrain_data (
     url TEXT PRIMARY KEY,
@@ -107,10 +104,9 @@ CREATE TABLE IF NOT EXISTS retrain_data (
 conn.commit()
 
 # ===============================
-# Helper: VirusTotal checker (returns "Phishing"/"Suspicious"/"Legitimate"/None)
+# Helper: VirusTotal checker
 # ===============================
 def call_virustotal(url):
-    """Call VirusTotal once and return (vt_verdict, raw_stats_dict) or (None, None) on failure."""
     if not VT_API_KEY:
         return None, None
     try:
@@ -122,14 +118,12 @@ def call_virustotal(url):
             timeout=25
         )
         if response.status_code != 200:
-            # sometimes VT returns 200 for submit, 200+ for analysis fetch - continue gracefully
             return None, None
 
         result = response.json()
         analysis_id = result["data"]["id"]
         analysis_url = f"https://www.virustotal.com/api/v3/analyses/{analysis_id}"
 
-        # Wait briefly and fetch analysis (VT can be eventual) — try a couple times
         for _ in range(3):
             res = requests.get(analysis_url, headers=headers, timeout=25)
             if res.status_code == 200:
@@ -137,14 +131,12 @@ def call_virustotal(url):
                 stats = attrs.get("stats", {})
                 malicious = stats.get("malicious", 0)
                 suspicious = stats.get("suspicious", 0)
-                # Interpret: even 1 malicious -> Phishing
                 if malicious >= 1:
                     return "Phishing", stats
                 elif suspicious >= 1:
                     return "Suspicious", stats
                 else:
                     return "Legitimate", stats
-            # if not ready, sleep a bit and retry
             time.sleep(1)
         return None, None
     except Exception as e:
@@ -158,143 +150,117 @@ def call_virustotal(url):
 def home():
     return "✅ Link Safety Checker API is running!"
 
-
 @app.route("/analyze", methods=["POST"])
 def analyze():
     data = request.get_json()
     url = data.get("url")
     if not url:
         return jsonify({"error": "No URL provided"}), 400
-
     url = url.strip()
 
-    # 1) If retrain_data has this URL, use it directly (skip VT)
-    c.execute("SELECT label, added_at FROM retrain_data WHERE url = ?", (url,))
+    # 1) retrain_data
+    c.execute("SELECT label FROM retrain_data WHERE url = ?", (url,))
     row = c.fetchone()
     if row:
-        stored_label = row[0]
-        if stored_label.lower() == "phishing":
+        stored_label = row[0].lower()
+        if stored_label == "phishing":
             verdict, recommendation, confidence = "Phishing", "Do not click", 95
-        elif stored_label.lower() == "suspicious":
+        elif stored_label == "suspicious":
             verdict, recommendation, confidence = "Suspicious", "Proceed with caution", 80
         else:
             verdict, recommendation, confidence = "Legitimate", "Safe to open", 90
-
-        domain_info = tldextract.extract(url)
-        domain = f"{domain_info.domain}.{domain_info.suffix}"
-        c.execute("""
-            INSERT INTO history (url, domain, verdict, confidence_pct, recommended_action, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (url, domain, verdict, confidence, recommendation, datetime.now()))
-        conn.commit()
-        return jsonify({
-            "url": url,
-            "domain": domain,
-            "verdict": verdict,
-            "confidence_pct": confidence,
-            "recommended_action": recommendation
-        })
-
-    # 2) Check vt_cache
-    c.execute("SELECT vt_verdict, vt_stats_json, checked_at FROM vt_cache WHERE url = ?", (url,))
-    vt_row = c.fetchone()
-    vt_verdict = None
-    vt_stats = None
-    if vt_row:
-        vt_verdict = vt_row[0]
-        try:
-            vt_stats = json.loads(vt_row[1]) if vt_row[1] else None
-        except:
-            vt_stats = None
-
-    # 3) If no vt_cache, call VirusTotal
-    if not vt_verdict:
-        vt_verdict, vt_stats = call_virustotal(url)
-        if vt_verdict is not None:
+    else:
+        # 2) vt_cache
+        c.execute("SELECT vt_verdict, vt_stats_json FROM vt_cache WHERE url = ?", (url,))
+        vt_row = c.fetchone()
+        vt_verdict, vt_stats = None, None
+        if vt_row:
+            vt_verdict = vt_row[0]
             try:
-                c.execute("""
-                    INSERT OR REPLACE INTO vt_cache (url, vt_verdict, vt_stats_json, checked_at)
-                    VALUES (?, ?, ?, ?)
-                """, (url, vt_verdict, json.dumps(vt_stats or {}), datetime.now()))
-                conn.commit()
-            except Exception as e:
-                print("⚠️ Failed to write vt_cache:", e)
+                vt_stats = json.loads(vt_row[1]) if vt_row[1] else None
+            except:
+                vt_stats = None
 
-    # 4) Dataset check (master_urls.csv override)
-    dataset_verdict = None
-    try:
-        df_master = pd.read_csv("data/master_urls.csv")
-        match = df_master[df_master["url"].str.lower() == url.lower()]
-        if not match.empty:
-            label = str(match.iloc[0]["label"]).lower()
-            if label in ["phishing", "1"]:
-                dataset_verdict = "Phishing"
-            elif label in ["suspicious"]:
-                dataset_verdict = "Suspicious"
+        # 3) VirusTotal fresh call
+        if not vt_verdict:
+            vt_verdict, vt_stats = call_virustotal(url)
+            if vt_verdict:
+                try:
+                    c.execute("""
+                        INSERT OR REPLACE INTO vt_cache (url, vt_verdict, vt_stats_json, checked_at)
+                        VALUES (?, ?, ?, ?)
+                    """, (url, vt_verdict, json.dumps(vt_stats or {}), datetime.now()))
+                    conn.commit()
+                except Exception as e:
+                    print("⚠️ Failed to write vt_cache:", e)
+
+        # 4) Dataset check
+        dataset_verdict = None
+        try:
+            df_master = pd.read_csv("data/master_urls.csv")
+            match = df_master[df_master["url"].str.lower() == url.lower()]
+            if not match.empty:
+                label = str(match.iloc[0]["label"]).lower()
+                if label in ["phishing", "1"]:
+                    dataset_verdict = "Phishing"
+                elif label in ["suspicious"]:
+                    dataset_verdict = "Suspicious"
+                else:
+                    dataset_verdict = "Legitimate"
+        except Exception as e:
+            print("⚠️ Could not check master dataset:", e)
+
+        # 5) AI model
+        features = extract_url_features(url)
+        X = pd.DataFrame([features])
+        X = pd.get_dummies(X, columns=["suffix"])
+        X = X.reindex(columns=expected_columns, fill_value=0)
+
+        try:
+            prediction = model.predict(X)[0]
+            probabilities = model.predict_proba(X)[0]
+            ai_confidence = int(max(probabilities) * 100)
+        except Exception as e:
+            print("⚠️ AI prediction error:", e)
+            prediction = 0
+            ai_confidence = 50
+
+        # 6) Combine (Dataset > VirusTotal > AI)
+        if dataset_verdict:
+            if dataset_verdict == "Phishing":
+                verdict, recommendation, confidence = "Phishing", "Do not click", 97
+            elif dataset_verdict == "Suspicious":
+                verdict, recommendation, confidence = "Suspicious", "Proceed with caution", 85
             else:
-                dataset_verdict = "Legitimate"
-    except Exception as e:
-        print("⚠️ Could not check master dataset:", e)
+                verdict, recommendation, confidence = "Legitimate", "Safe to open", 90
+        elif vt_verdict:
+            if vt_verdict == "Phishing":
+                verdict, recommendation, confidence = "Phishing", "Do not click", 95
+            elif vt_verdict == "Suspicious":
+                verdict, recommendation, confidence = "Suspicious", "Proceed with caution", 85
+            else:
+                verdict, recommendation, confidence = "Legitimate", "Safe to open", 90
+        else:
+            if prediction == 1 and ai_confidence >= 70:
+                verdict, recommendation, confidence = "Phishing", "Do not click", ai_confidence
+            elif 50 <= ai_confidence < 70:
+                verdict, recommendation, confidence = "Suspicious", "Proceed with caution", ai_confidence
+            else:
+                verdict, recommendation, confidence = "Legitimate", "Safe to open", ai_confidence
 
-    # 5) Compute AI model prediction
-    features = extract_url_features(url)
-    X = pd.DataFrame([features])
-    X = pd.get_dummies(X, columns=["suffix"])
-    X = X.reindex(columns=expected_columns, fill_value=0)
+        # Save to retrain_data
+        try:
+            c.execute("""
+                INSERT OR REPLACE INTO retrain_data (url, label, added_at)
+                VALUES (?, ?, ?)
+            """, (url, verdict, datetime.now()))
+            conn.commit()
+        except Exception as e:
+            print("⚠️ Failed to write retrain_data:", e)
 
-    try:
-        prediction = model.predict(X)[0]
-        probabilities = model.predict_proba(X)[0]
-        ai_confidence = int(max(probabilities) * 100)
-    except Exception as e:
-        print("⚠️ AI prediction error:", e)
-        prediction = 0
-        ai_confidence = 50
-
-       # 6) Combine decisions (priority: VirusTotal > Dataset > AI)
-
-# Dataset is most trusted if we have a label
-if dataset_verdict:
-    verdict = dataset_verdict
-    if verdict == "Phishing":
-        recommendation, confidence = "Do not click", 97
-    elif verdict == "Suspicious":
-        recommendation, confidence = "Proceed with caution", 85
-    else:
-        recommendation, confidence = "Safe to open", 90
-
-# If VirusTotal is available, use it next
-elif vt_verdict:
-    if vt_verdict == "Phishing":
-        verdict, recommendation, confidence = "Phishing", "Do not click", 95
-    elif vt_verdict == "Suspicious":
-        verdict, recommendation, confidence = "Suspicious", "Proceed with caution", 85
-    else:  # VT said Legitimate
-        verdict, recommendation, confidence = "Legitimate", "Safe to open", 90
-
-# Fall back to AI model
-else:
-    if prediction == 1 and ai_confidence >= 70:
-        verdict, recommendation, confidence = "Phishing", "Do not click", ai_confidence
-    elif 50 <= ai_confidence < 70:
-        verdict, recommendation, confidence = "Suspicious", "Proceed with caution", ai_confidence
-    else:
-        verdict, recommendation, confidence = "Legitimate", "Safe to open", ai_confidence
-
-    # 7) Save to retrain_data
-    try:
-        c.execute("""
-            INSERT OR REPLACE INTO retrain_data (url, label, added_at)
-            VALUES (?, ?, ?)
-        """, (url, verdict, datetime.now()))
-        conn.commit()
-    except Exception as e:
-        print("⚠️ Failed to write retrain_data:", e)
-
-    # 8) Save to history
+    # Save to history
     domain_info = tldextract.extract(url)
     domain = f"{domain_info.domain}.{domain_info.suffix}"
-
     c.execute("""
         INSERT INTO history (url, domain, verdict, confidence_pct, recommended_action, timestamp)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -308,7 +274,6 @@ else:
         "confidence_pct": confidence,
         "recommended_action": recommendation
     })
-
 
 @app.route("/history", methods=["GET"])
 def get_history():
@@ -326,7 +291,6 @@ def get_history():
         })
     return jsonify(history)
 
-# 🔹 Add this new route here
 @app.route('/stats', methods=['GET'])
 def get_stats():
     conn = sqlite3.connect(DB_PATH)
@@ -340,31 +304,24 @@ def get_stats():
         stats[verdict] = count
     return jsonify(stats)
 
-
 @app.route("/inbox", methods=["GET"])
 def get_inbox():
     try:
         mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
         mail.login(IMAP_USER, IMAP_PASS)
         mail.select("inbox")
-
         status, messages = mail.search(None, "ALL")
-        email_ids = messages[0].split()[-5:]  # last 5 emails
+        email_ids = messages[0].split()[-5:]
 
         inbox_data = []
         for eid in reversed(email_ids):
             res, msg_data = mail.fetch(eid, "(RFC822)")
             msg = email.message_from_bytes(msg_data[0][1])
-
             subject, encoding = decode_header(msg["Subject"])[0]
             if isinstance(subject, bytes):
                 subject = subject.decode(encoding or "utf-8", errors="ignore")
-
             from_ = msg.get("From")
-            body = ""
-            links = []
-
-            # Extract text + HTML (look for hrefs in HTML)
+            body, links = "", []
             if msg.is_multipart():
                 for part in msg.walk():
                     ctype = part.get_content_type()
@@ -388,11 +345,10 @@ def get_inbox():
                     links.extend(re.findall(r"https?://[^\s\"'>]+", body))
                 except:
                     pass
-
             inbox_data.append({
                 "subject": subject,
                 "from": from_,
-                "links": list(dict.fromkeys(links))  # preserve order, unique
+                "links": list(dict.fromkeys(links))
             })
 
         mail.logout()
@@ -400,11 +356,10 @@ def get_inbox():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 # ===============================
 # Run
 # ===============================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  # Render sets PORT automatically
+    port = int(os.environ.get("PORT", 5000))
     print(f"🚀 Starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
