@@ -252,27 +252,34 @@ def analyze():
         ai_confidence = 50
 
        # 6) Combine decisions (priority: VirusTotal > Dataset > AI)
+
+# Dataset is most trusted if we have a label
+if dataset_verdict:
+    verdict = dataset_verdict
+    if verdict == "Phishing":
+        recommendation, confidence = "Do not click", 97
+    elif verdict == "Suspicious":
+        recommendation, confidence = "Proceed with caution", 85
+    else:
+        recommendation, confidence = "Safe to open", 90
+
+# If VirusTotal is available, use it next
+elif vt_verdict:
     if vt_verdict == "Phishing":
         verdict, recommendation, confidence = "Phishing", "Do not click", 95
     elif vt_verdict == "Suspicious":
         verdict, recommendation, confidence = "Suspicious", "Proceed with caution", 85
-    elif vt_verdict == "Legitimate":
-        verdict, recommendation, confidence = "Legitimate", "Safe to open", 95
-
-    elif dataset_verdict == "Phishing":
-        verdict, recommendation, confidence = "Phishing", "Do not click", 90
-    elif dataset_verdict == "Suspicious":
-        verdict, recommendation, confidence = "Suspicious", "Proceed with caution", 80
-    elif dataset_verdict == "Legitimate":
+    else:  # VT said Legitimate
         verdict, recommendation, confidence = "Legitimate", "Safe to open", 90
 
-    elif prediction == 1 and ai_confidence >= 70:
+# Fall back to AI model
+else:
+    if prediction == 1 and ai_confidence >= 70:
         verdict, recommendation, confidence = "Phishing", "Do not click", ai_confidence
     elif 50 <= ai_confidence < 70:
         verdict, recommendation, confidence = "Suspicious", "Proceed with caution", ai_confidence
     else:
-        verdict, recommendation, confidence = "Legitimate", "Safe to open", max(ai_confidence, 90)
-
+        verdict, recommendation, confidence = "Legitimate", "Safe to open", ai_confidence
 
     # 7) Save to retrain_data
     try:
